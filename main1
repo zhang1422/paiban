@@ -1,0 +1,318 @@
+import math
+import matplotlib.pyplot as plt
+import random
+from shapely.geometry import Polygon
+from shapely.affinity import rotate, translate
+import time
+
+
+class FigureAlgorithm:
+    def __init__(self, input_shape_data):
+        start = time.time()
+        self.baseplate = Polygon(input_shape_data[0]['图形尺寸'])
+        self.input_shape_data = input_shape_data
+
+        # 排版图形基本参数
+        self.unit = 1  # 图形间隙，默认为1
+        self.angle_list = [0, 90]  # 图形可旋转角度，目前只有旋转0度、90度
+        self.orientation_list = ['x', 'y']  # 图形优先排版方式
+
+        # 遗传算法参数
+        self.population_number = 60  # 种群数
+        self.mutation_rate = 0.5  # 变异率
+        self.crossover_rate = 0.8  # 交叉率
+        self.max_iteration = 50 # 最大迭代次数
+        self.max_not_update = 10  # 最大未更新次数
+        self.max_not_update_area = 3 # 面积最大未更新次数
+        self.time_limit = 180  # 最大迭代时间
+
+        # 图形处理
+        self.shape_data_dict, self.rotated_shape_dict = self.get_shape_data_dict()  # 排版图形信息
+        self.baseplate_max_x, self.baseplate_max_y = self.get_baseplate_bound()  # 底板的x、y范围
+        self.population = None
+
+    def algorithm(self):
+        start = time.time()
+        self.population = self.initialization_population()  # 初始化种群
+        best_fitness, best_placed_shapes, best_p = self.population[0]  # 最优目标函数值、最优排版结果、最优排版方案
+        not_update = 0  # 未更新次数
+        for inter in range(self.max_iteration):
+            select_parents = self.select_parents_function()  # 选择父代
+            self.population = []  # 初始化种群
+            for parent1, parent2 in zip(select_parents[::2], select_parents[1::2]):
+                child1, child2 = self.crossover(parent1, parent2)  # 交叉
+                self.mutation(child1)  # 变异
+                self.mutation(child2)
+            # 获取本次迭代最优解
+            best_inter_fitness, best_inter_placed_shapes, best_inter_p = self.population[0]
+            print('第{}次迭代，本次最优解为{}，全局最优解为{}，最大未更新次数为{}, 花费时间{}'.format(
+                inter, best_inter_fitness, best_fitness, not_update, time.time() - start))
+            # 更新解
+            if best_inter_fitness < best_fitness:
+                not_update = 0
+                best_fitness = best_inter_fitness
+                best_placed_shapes = best_inter_placed_shapes
+            else:
+                not_update += 1
+            # 结束算法
+            if not_update >= self.max_not_update: # 条件1：有图形未被排列，且最大未更新次数超出设置的值
+                break
+            if int(best_fitness / 100000000) == 0 and not_update >= self.max_not_update_area:  # 条件2：图形都被排列，使用面积最大未更新到达3次
+                break
+            if time.time() - start >= self.time_limit:  # 条件3：迭代时间超出设置的时间
+                break
+
+        # 画图，输出结果
+        self.out_picture(best_placed_shapes)
+
+    def get_child(self, parent_shape_order_list, child_order_list):
+        child_shape_order_list = []
+        n = 0
+        for _ in parent_shape_order_list:
+            if _ not in child_order_list:
+                child_shape_order_list.append(_)
+            else:
+                child_shape_order_list.append(child_order_list[n])
+                n += 1
+        return child_shape_order_list
+
+    def mutation(self, child):
+        """ 变异操作：单点变异、多点变异 """
+        if random.random() < self.mutation_rate:
+            shape_order_list, shape_angle, orientation_list = child
+            ori_fitness, ori_placed_shapes = self.fitness(child)
+            self.population.append([ori_fitness, ori_placed_shapes, child])
+            # 选取变异元素
+            mutation_point = random.randint(1, len(self.shape_data_dict) - 1)
+            select_list = random.sample(shape_order_list, mutation_point)
+
+            # 变异1: 打乱变异元素顺序，进行前、后组合
+            remain = [_ for _ in shape_order_list if _ not in select_list]
+            for _ in range(mutation_point):
+                random.shuffle(select_list)
+                new_lst1 = select_list + remain
+                new_lst2 = remain + select_list
+                for f in select_list:
+                    shape_angle[f] = random.choice(self.angle_list)
+                    orientation_list[f] = random.choice(self.orientation_list)
+                p1 = [new_lst1, shape_angle, orientation_list]
+                p2 = [new_lst2, shape_angle, orientation_list]
+                for p in [p1, p2]:
+                    new_fitness, placed_shapes = self.fitness(p)
+                    self.population.append([new_fitness, placed_shapes, p])
+
+            # 变异2：依次抽出变异元素，随机选取位置交换
+            for f in select_list:
+                f_index = shape_order_list.index(f)
+                remaining_elements = shape_order_list[:f_index] + shape_order_list[f_index + 1:]
+                select_f = random.choice(remaining_elements)
+                select_f_index = shape_order_list.index(select_f)
+                shape_order_list[f_index], shape_order_list[select_f_index] = shape_order_list[select_f_index], shape_order_list[f_index]
+                shape_angle[f] = random.choice(self.angle_list)
+                orientation_list[f] = random.choice(self.orientation_list)
+                new_child = [shape_order_list, shape_angle, orientation_list]
+                new_fitness, placed_shapes = self.fitness(new_child)
+                self.population.append([new_fitness, placed_shapes, new_child])
+
+
+    def crossover(self, parent1, parent2):
+        """ 交叉操作：多点交叉 """
+        parent1_fitness,  parent1_shapes, (parent1_order_list, parent1_angle, parent1_orientation) = parent1
+        parent2_fitness,  parent2_shapes, (parent2_order_list, parent2_angle, parent2_orientation) = parent2
+        if random.random() < self.crossover_rate:
+            # 选取交叉元素
+            crossover_point = random.randint(1, len(self.shape_data_dict) - 1)
+            select_list = random.sample(parent1_order_list, crossover_point)
+
+            # 顺序交叉
+            child1_order_list = [_ for _ in parent1_order_list if _ in select_list]
+            child2_order_list = [_ for _ in parent2_order_list if _ in select_list]
+            child1_shape_order_list = self.get_child(parent1_order_list, child2_order_list)
+            child2_shape_order_list = self.get_child(parent2_order_list, child1_order_list)
+
+            # 角度、位置交叉
+            for f in select_list:
+                parent1_angle[f], parent2_angle[f] = parent2_angle[f], parent1_angle[f]  # 角度交叉
+                parent1_orientation[f], parent2_orientation[f] = parent2_orientation[f], parent1_orientation[f]  # 位置交叉
+
+            # 子代
+            child1 = [child1_shape_order_list, parent1_angle, parent1_orientation]
+            child2 = [child2_shape_order_list, parent2_angle, parent2_orientation]
+            # 计算目标函数
+            for child in [child1, child2]:
+                fitness, placed_shapes = self.fitness(child)
+                self.population.append([fitness, placed_shapes, child])
+            return child1, child2
+        else:
+            self.population.append(parent1)
+            self.population.append(parent2)
+            return parent1[2], parent2[2]
+
+    def select_parents_function(self):
+        """ 选择父代：排名策略 """
+        self.population.sort(key=lambda x: x[0])  # 按目标函数值升序
+        select_parents = [p for p in self.population[:self.population_number]]
+        return select_parents
+
+    def is_valid_position(self, translated_shape, placed_shapes):
+        """ 检查当前放置位置是否合法（不与其他图形重叠，并在容器内） """
+        if not self.baseplate.contains(translated_shape):
+            return False  # 不在容器内
+        for shape in placed_shapes:
+            intersection = translated_shape.intersection(shape)
+            if intersection:
+                return False
+        return True
+
+    def fitness(self, p):
+        unformatted_shapes_number = 0  # 未排列的图形数量
+        shape_order_list, shape_angle_list, figure_orientation_list = p
+        placed_shapes = []  # 记录排版方案
+        for index, f_name in enumerate(shape_order_list):
+            angle = shape_angle_list[f_name]
+            orientation = figure_orientation_list[f_name]
+            rotated_shape, shape_x, shape_y = self.rotated_shape_dict[f_name, angle]
+            # 初始化
+            placed = False
+            if len(placed_shapes) == 0:
+                y_offset = self.unit
+                while not placed and (y_offset + shape_y <= self.baseplate_max_y):
+                    for x_offset in range(self.unit, self.baseplate_max_x):
+                        # 如果当前物体放不下，换到下一个位置
+                        if x_offset + shape_x > self.baseplate_max_x or y_offset + shape_y > self.baseplate_max_y:
+                            break
+                        # 检查位置是否合法
+                        new_rotated_shape = translate(rotated_shape, x_offset, y_offset)
+                        if self.is_valid_position(new_rotated_shape, placed_shapes):
+                            placed_shapes.append(new_rotated_shape)
+                            placed = True
+                            break
+                    y_offset += 1
+            else:
+                # 获取可用的坐标
+                select_point = self.get_select_point(placed_shapes)  # 根据输入图形获得可选坐标集合
+                if orientation == 'x':
+                    select_point.sort(key=lambda x: (x[1], x[0]))
+                else:
+                    select_point.sort(key=lambda x: (x[0], x[1]))
+                for x_offset, y_offset in select_point:
+                    # 若图形平移范围超出底板范围，直接continue
+                    if x_offset + shape_x > self.baseplate_max_x or y_offset + shape_y > self.baseplate_max_y:
+                        continue
+                    new_rotated_shape = translate(rotated_shape, x_offset, y_offset) # 平移产生新图形
+                    # 碰撞测试
+                    if self.is_valid_position(new_rotated_shape, placed_shapes):
+                        placed_shapes.append(new_rotated_shape)
+                        placed = True
+                        break
+
+            if not placed:
+                # print(f"无法放置{f_name}物体，容器空间不足！")
+                unformatted_shapes_number += 1
+
+        # 计算目标函数：目标函数的计算由两部分组成， 目标函数 = 未排版图形数量 * 100000000 + 已排版图形的外接矩形面积
+        if len(placed_shapes) == 0:
+            max_y, max_x = 0, 0
+        else:
+            max_y = max([shape.bounds[-1] for shape in placed_shapes])
+            max_x = max([shape.bounds[-2] for shape in placed_shapes])
+        occupied_area = max_x * max_y  # 使用面积
+        fitness = unformatted_shapes_number * 100000000 + occupied_area
+        # print(unformatted_shapes_number)
+        return fitness, placed_shapes
+
+    @staticmethod
+    def get_select_point(placed_shapes):
+        '''根据输入图形获得可选坐标集合'''
+        select_point = []
+        for shape in placed_shapes:
+            for x, y in shape.exterior.coords:
+                point1 = (x + 1, y + 1)
+                point2 = (x + 1, y)
+                point3 = (x, y + 1)
+                select_point.append(point1)
+                select_point.append(point2)
+                select_point.append(point3)
+        select_point = list(set(select_point))
+        return select_point
+
+
+    @staticmethod
+    def add_figure(f, color):
+        x1, y1 = zip(*f)
+        plt.plot(x1 + (x1[0],), y1 + (y1[0],), color=color, label=None)
+
+    def out_picture(self, placed_shapes):
+        # 绘图
+        plt.figure(figsize=(6, 8))
+        # 添加底图和排列的图形
+        self.add_figure(list(self.baseplate.exterior.coords), 'red')
+        for _index, figure in enumerate(placed_shapes):
+            self.add_figure(list(figure.exterior.coords), 'blue')
+            x = (figure.bounds[0] + figure.bounds[-2])/2
+            y = (figure.bounds[1] + figure.bounds[-1])/2
+            plt.text(x, y, _index + 1, ha='center', va='center', fontsize=10, color='black')
+        plt.gca().set_aspect('equal', adjustable='box')
+        plt.xlabel('x')
+        plt.ylabel('y')
+        # plt.legend()
+        plt.grid(True)
+        plt.show()
+        plt.close()
+
+    def get_baseplate_bound(self):
+        minx, miny, maxx, maxy = self.baseplate.bounds
+        baseplate_max_x = maxx - minx
+        baseplate_max_y = maxy - miny
+        return math.ceil(baseplate_max_x), math.ceil(baseplate_max_y)
+
+    def get_shape_data_dict(self):
+        shape_data_dict = {}  # 名称: 图形信息
+        rotated_shape_dict = {}  # （名称，旋转角度）：图形信息
+        for figure in self.input_shape_data:
+            if figure['图形名称'] == '底板':
+                continue
+            figure_num = figure['图形数量']
+            figure_size = figure['图形尺寸']
+            for _ in range(figure_num):
+                figure_name = figure['图形名称'] + '-' + str(_)
+                shape_data_dict[figure_name] = Polygon(figure_size)
+                # 计算旋转后的图形
+                for angle in self.angle_list:
+                    rotated_shape = rotate(Polygon(figure_size), angle, origin=(0, 0))
+                    minx, miny, maxx, maxy = rotated_shape.bounds
+                    rotated_shape = translate(rotated_shape, max(0, -minx), max(0, -miny))
+                    shape_x = maxx - minx
+                    shape_y = maxy - miny
+                    rotated_shape_dict[figure_name, angle] = [rotated_shape, shape_x, shape_y]
+        return shape_data_dict, rotated_shape_dict
+
+    def initialization_population(self):
+        '''初始化种群'''
+        population = []
+        for p in range(self.population_number * 2):
+            shape_order_list = list(self.shape_data_dict)
+            shape_angle_list = {s: random.choice(self.angle_list) for s in shape_order_list}
+            figure_orientation_list = {s: random.choice(self.orientation_list) for s in shape_order_list}
+            random.shuffle(shape_order_list)
+            p = [shape_order_list, shape_angle_list, figure_orientation_list]
+            fitness, placed_shapes = self.fitness(p)
+            population.append([fitness, placed_shapes, p])
+        population.sort(key=lambda x: x[0])  # 按目标函数值升序
+        population = [p for p in population[:self.population_number]]
+        return population
+
+
+if __name__ == '__main__':
+    input_shape_data = [
+        {'图形名称': '底板', '图形尺寸': [(0, 0), (200, 0), (250, 250), (0, 250)], '图形数量': 1},
+        {'图形名称': '夹板镶块1', '图形尺寸': [(0, 0), (35, 0), (35, 15), (10, 15), (10, 165), (0, 180)], '图形数量': 4},
+        {'图形名称': '夹板镶块2', '图形尺寸': [(0, 0), (7, 0), (7, 57), (0, 57)], '图形数量': 2},
+        {'图形名称': '夹板镶块3', '图形尺寸': [(0, 0), (15, 0), (15, 140), (0, 140)], '图形数量': 2},
+        {'图形名称': '夹板镶块4', '图形尺寸': [(0, 0), (15, 0), (15, 190), (0, 190)], '图形数量': 2},
+        {'图形名称': '夹板镶块2', '图形尺寸': [(0, 0), (50, 0), (50, 40), (30, 40), (30, 60), (0, 60)], '图形数量': 2},
+        {'图形名称': '夹板镶块3', '图形尺寸': [(0, 0), (50, 0), (50, 50), (0, 50)], '图形数量': 2},
+        {'图形名称': '夹板镶块4', '图形尺寸': [(0, 0), (16, 0), (16, 18), (0, 18)], '图形数量': 2},
+    ]
+    a = FigureAlgorithm(input_shape_data)
+    a.algorithm()
